@@ -1139,6 +1139,79 @@ static const struct component_ops dw_mipi_dsi_rockchip_ops = {
 	.unbind	= dw_mipi_dsi_rockchip_unbind,
 };
 
+static int dw_mipi_dsi_rockchip_host_attach(void *priv_data,
+					    struct mipi_dsi_device *device)
+{
+	struct dw_mipi_dsi_rockchip *dsi = priv_data;
+	struct device *second;
+	int ret;
+
+	mutex_lock(&dsi->usage_mutex);
+
+	if (dsi->usage_mode != DW_DSI_USAGE_IDLE) {
+		DRM_DEV_ERROR(dsi->dev, "dsi controller already in use\n");
+		mutex_unlock(&dsi->usage_mutex);
+		return -EBUSY;
+	}
+
+	dsi->usage_mode = DW_DSI_USAGE_DSI;
+	mutex_unlock(&dsi->usage_mutex);
+
+	ret = component_add(dsi->dev, &dw_mipi_dsi_rockchip_ops);
+	if (ret) {
+		DRM_DEV_ERROR(dsi->dev, "Failed to register component: %d\n",
+					ret);
+		goto out;
+	}
+
+	second = dw_mipi_dsi_rockchip_find_second(dsi);
+	if (IS_ERR(second)) {
+		ret = PTR_ERR(second);
+		goto out;
+	}
+	if (second) {
+		ret = component_add(second, &dw_mipi_dsi_rockchip_ops);
+		if (ret) {
+			DRM_DEV_ERROR(second,
+				      "Failed to register component: %d\n",
+				      ret);
+			goto out;
+		}
+	}
+
+	return 0;
+
+out:
+	mutex_lock(&dsi->usage_mutex);
+	dsi->usage_mode = DW_DSI_USAGE_IDLE;
+	mutex_unlock(&dsi->usage_mutex);
+	return ret;
+}
+
+static int dw_mipi_dsi_rockchip_host_detach(void *priv_data,
+					    struct mipi_dsi_device *device)
+{
+	struct dw_mipi_dsi_rockchip *dsi = priv_data;
+	struct device *second;
+
+	second = dw_mipi_dsi_rockchip_find_second(dsi);
+	if (second && !IS_ERR(second))
+		component_del(second, &dw_mipi_dsi_rockchip_ops);
+
+	component_del(dsi->dev, &dw_mipi_dsi_rockchip_ops);
+
+	mutex_lock(&dsi->usage_mutex);
+	dsi->usage_mode = DW_DSI_USAGE_IDLE;
+	mutex_unlock(&dsi->usage_mutex);
+
+	return 0;
+}
+
+static const struct dw_mipi_dsi_host_ops dw_mipi_dsi_rockchip_host_ops = {
+	.attach = dw_mipi_dsi_rockchip_host_attach,
+	.detach = dw_mipi_dsi_rockchip_host_detach,
+};
+
 static int dw_mipi_dsi_rockchip_component_add(struct dw_mipi_dsi_rockchip *dsi)
 {
 	int ret;
@@ -1513,6 +1586,7 @@ static int dw_mipi_dsi_rockchip_probe(struct platform_device *pdev)
 	dsi->pdata.base = dsi->base;
 	dsi->pdata.max_data_lanes = dsi->cdata->max_data_lanes;
 	dsi->pdata.phy_ops = &dw_mipi_dsi_rockchip_phy_ops;
+	dsi->pdata.host_ops = &dw_mipi_dsi_rockchip_host_ops;
 	dsi->pdata.priv_data = dsi;
 
 	if (dsi->cdata->soc_type == RK3568)
@@ -1541,13 +1615,15 @@ static int dw_mipi_dsi_rockchip_probe(struct platform_device *pdev)
 				      "Failed to probe dw_mipi_dsi: %d\n", ret);
 		goto err_clkdisable;
 	}
-
+/*
 	ret = dw_mipi_dsi_rockchip_component_add(dsi);
+
 	if (ret < 0) {
 		dw_mipi_dsi_remove(dsi->dmd);
 		goto err_clkdisable;
 	}
 
+*/
 	return 0;
 
 err_clkdisable:
@@ -1558,7 +1634,6 @@ err_clkdisable:
 static int dw_mipi_dsi_rockchip_remove(struct platform_device *pdev)
 {
 	struct dw_mipi_dsi_rockchip *dsi = platform_get_drvdata(pdev);
-
 
 	dw_mipi_dsi_rockchip_component_del(dsi);
 	dw_mipi_dsi_remove(dsi->dmd);
